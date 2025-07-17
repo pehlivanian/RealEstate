@@ -10,21 +10,24 @@ import numpy as np
 from typing import Dict, List, Any
 import logging
 import os
+import argparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class PropertyAggregator:
-    def __init__(self, rapid_api_key: str):
+    def __init__(self, rapid_api_key: str, city: str, state: str):
         self.api_key = rapid_api_key
         self.properties = []
+        self.city = city
+        self.state = state
         self.apis = {
             'us-real-estate': {
                 'host': 'us-real-estate.p.rapidapi.com',
                 'endpoint': '/v2/for-sale',
                 'params': {
-                    'city': 'Nyack',
-                    'state_code': 'NY',
+                    'city': city,
+                    'state_code': state,
                     'offset': '0',
                     'limit': '200',
                     'sort': 'newest',
@@ -34,7 +37,7 @@ class PropertyAggregator:
                 'host': 'zillow-com1.p.rapidapi.com',
                 'endpoint': '/propertyExtendedSearch',
                 'params': {
-                    'location': 'Nyack, NY',
+                    'location': f'{city}, {state}',
                     'status_type': 'ForSale',
                     'home_type': 'Houses'
                 }
@@ -60,9 +63,12 @@ class PropertyAggregator:
                     # Extract property details
                     address = prop.get('address', 'N/A')
                     price = prop.get('price', 0)
-                    bedrooms = prop.get('beds', 0)
-                    bathrooms = prop.get('baths', 0)
-                    sqft = prop.get('area', 0)
+                    bedrooms = prop.get('bedrooms', 0)
+                    bathrooms = prop.get('bathrooms', 0)
+                    sqft = prop.get('livingArea', 0)
+                    lotsize_value = str(prop.get('lotAreaValue', 0)) or 'N/A'
+                    lotsize_units = str(prop.get('lotAreaUnit', 0)) or ''
+                    lotsize = ' '.join([lotsize_value, lotsize_units])
                 
                     # More robust image handling
                     thumbnail_url = None
@@ -94,7 +100,10 @@ class PropertyAggregator:
                         listing_url = f"https://www.zillow.com/homes/{urllib.parse.quote(address.replace(' ', '-'))}"
                 
                     # Estimate monthly costs 
-                    monthly_costs = self.estimate_monthly_costs(price, sqft, 'single family')
+                    # monthly_costs = self.estimate_monthly_costs(price, sqft, 'single family')
+
+                    # Additional tags
+                    tags = []
                 
                     # Add property to parsed list
                     parsed_properties.append({
@@ -103,10 +112,10 @@ class PropertyAggregator:
                         'bedrooms': bedrooms,
                         'bathrooms': bathrooms,
                         'sqft': sqft,
+                        'lotsize': lotsize,
                         'property_type': 'Single Family',
+                        'tags': tags,                  
                         'thumbnail_url': thumbnail_url,
-                        'monthly_costs': monthly_costs,
-                        'neighborhood': prop.get('neighborhood', 'Nyack'),
                         'listing_url': listing_url,
                         'source': 'Zillow'
                         })
@@ -290,11 +299,18 @@ class PropertyAggregator:
                         location = prop.get('location', {}).get('address', {}) if prop.get('location') else {}
                         
                         # Skip properties that don't meet criteria
-                        if not description or description.get('beds', 0) < 3:
+                        if not description or (description.get('beds', 0) and description.get('beds', 0) < 3):
                             continue
                         
                         price = prop.get('list_price', 0)
                         sqft = description.get('sqft', 0)
+                        lotsize = ' '.join([str(description.get('lot_sqft', 0)), 'sqft'])
+                        lotsize_sqft = description.get('lot_sqft', 0)
+                        if lotsize_sqft:
+                            lotsize_acre = str(round(lotsize_sqft / 43560, 4))
+                            lotsize = ' '.join([lotsize_acre, 'acres'])
+                        else:
+                            lotsize = 'N/A'
                         property_type = description.get('type', 'Unknown')
                         
                         # Get coordinates for neighborhood determination
@@ -303,13 +319,23 @@ class PropertyAggregator:
                         lon = coords.get('lon')
                         
                         # Determine neighborhood
-                        neighborhood = self.determine_neighborhood(lat, lon) if lat and lon else 'Jersey City'
+                        # neighborhood = self.determine_neighborhood(lat, lon) if lat and lon else 'Jersey City'
                         
                         # Estimate monthly costs
-                        monthly_costs = self.estimate_monthly_costs(price, sqft, property_type)
+                        # monthly_costs = self.estimate_monthly_costs(price, sqft, property_type)
                         
                         # Get listing URL
                         listing_url = f"https://www.realtor.com/realestateandhomes-detail/{prop.get('permalink', '')}" if prop.get('permalink') else ''
+
+                        # Thumbnail url
+                        primary_photo = prop.get('primary_photo', {})
+                        if primary_photo:
+                            thumbnail_url = primary_photo.get('href')
+                        else:
+                            thumbnail_url = None
+
+                        # Additional tags
+                        tags = prop.get('tags')
                         
                         parsed_properties.append({
                             'price': price,
@@ -317,10 +343,10 @@ class PropertyAggregator:
                             'bedrooms': description.get('beds', 0),
                             'bathrooms': description.get('baths', 0),
                             'sqft': sqft,
+                            'lotsize': lotsize,
                             'property_type': property_type,
-                            'thumbnail_url': prop.get('primary_photo', {}).get('href'),
-                            'monthly_costs': monthly_costs,
-                            'neighborhood': neighborhood,
+                            'tags': tags,
+                            'thumbnail_url': thumbnail_url,
                             'listing_url': listing_url
                         })
                     except Exception as e:
@@ -349,6 +375,28 @@ class PropertyAggregator:
             for result in results:
                 self.properties.extend(result)
 
+    def format_tags(self, tags):
+        """
+        Format property tags into HTML pill badges
+        """
+        if not tags or len(tags) == 0:
+            return ""
+            
+        # Handle different data types
+        if isinstance(tags, str):
+            tag_list = tags.split(',')
+        elif isinstance(tags, list):
+            tag_list = tags
+        else:
+            return ""
+            
+        html_tags = []
+        for tag in tag_list:
+            if tag and str(tag).strip():
+                html_tags.append(f'<span class="tag">{str(tag).strip()}</span>')
+                
+        return ''.join(html_tags)
+        
     def generate_html_report(self):
         """
         Generate a comprehensive HTML report of fetched properties
@@ -368,7 +416,7 @@ class PropertyAggregator:
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Holmdel Properties Report</title>
+    <title>{self.city}, {self.state} Properties Report</title>
     <style>
         body {{
             font-family: Arial, sans-serif;
@@ -406,10 +454,23 @@ class PropertyAggregator:
             text-decoration: none;
             margin-top: 10px;
         }}
+        .tag {{
+            display: inline-block;
+            background-color: #f0f0f0;
+            color: #555;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            margin-right: 6px;
+            margin-bottom: 6px;
+        }}
+        .tags-container {{
+            margin-top: 8px;
+        }}
     </style>
 </head>
 <body>
-    <h1>Jersey City Properties Report</h1>
+    <h1>{self.city}, {self.state} Properties Report</h1>
     <p>Generated on: {current_time}</p>
 """
 
@@ -424,10 +485,11 @@ class PropertyAggregator:
         {thumbnail_html}
         <div class="property-details">
             <h2>{row['address']}</h2>
-            <p><strong>Neighborhood:</strong> {row['neighborhood']}</p>
             <p class="property-price">${row['price']:,.2f}</p>
-            <p>{row['bedrooms']} beds | {row['bathrooms']} baths | {row['sqft']:,} sq ft</p>
-            <p><strong>Monthly Non-Mortgage Costs:</strong> ${row['monthly_costs']['total_monthly_non_mortgage_costs']:,.2f}</p>
+            <p>{row['bedrooms']} beds | {row['bathrooms']} baths | {row['sqft']:,} sq ft | {row['lotsize']} lot</p>
+            <div class="tags-container">
+                {self.format_tags(row['tags'])}
+            </div>
             {'<a href="' + row['listing_url'] + '" class="property-link" target="_blank">View Listing</a>' if row.get('listing_url') else ''}
         </div>
     </div>
@@ -438,7 +500,7 @@ class PropertyAggregator:
 </html>"""
 
             # Write to file
-            output_file = os.path.expanduser('~/jersey_city_properties.html')
+            output_file = os.path.expanduser(f'~/{self.city.lower().replace(" ", "_")}_{self.state.lower()}_properties.html')
             with open(output_file, 'w', encoding='utf-8') as f:
                 f.write(html_content)
 
@@ -455,22 +517,29 @@ async def main():
     """
     Main execution method
     """
-    # Replace with your actual RapidAPI key
-    # api_key = os.environ.get('RAPIDAPI_KEY', 'YOUR_RAPIDAPI_KEY')
-    api_key = "9cd0949b08msha286b6987d46fe9p17feccjsn846e7f222f6f"
+    # Set up command line arguments
+    parser = argparse.ArgumentParser(description='Fetch real estate properties from APIs and generate a report')
+    parser.add_argument('--city', type=str, default='Nyack', help='City to search for properties')
+    parser.add_argument('--state', type=str, default='NY', help='State code (e.g., NY, CA, FL)')
+    parser.add_argument('--key', type=str, help='RapidAPI key (optional, will use default if not provided)')
     
-    aggregator = PropertyAggregator(api_key)
-    logger.info("Starting to fetch property data...")
+    args = parser.parse_args()
+    
+    # Get API key
+    api_key = args.key if args.key else "9cd0949b08msha286b6987d46fe9p17feccjsn846e7f222f6f"
+    
+    aggregator = PropertyAggregator(api_key, args.city, args.state)
+    logger.info(f"Starting to fetch property data for {args.city}, {args.state}...")
     
     await aggregator.fetch_all_properties()
     
     if aggregator.properties:
         report_success = aggregator.generate_html_report()
-        logger.info(f"Found {len(aggregator.properties)} properties")
+        logger.info(f"Found {len(aggregator.properties)} properties in {args.city}, {args.state}")
         if not report_success:
             logger.error("Failed to generate HTML report")
     else:
-        logger.error("No properties were found. Please check your API key and try again.")
+        logger.error(f"No properties were found in {args.city}, {args.state}. Please check your API key and try again.")
 
 if __name__ == "__main__":
     asyncio.run(main())
